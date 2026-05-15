@@ -1,13 +1,18 @@
 use burn::{
-    backend::{Autodiff, NdArray},
-    module::Module,
+    backend::{Autodiff, Flex},
+    module::{AutodiffModule, Module, Quantizer},
     nn::{Linear, LinearConfig},
     optim::{AdamConfig, GradientsParams, Optimizer},
     prelude::*,
-    tensor::{TensorData, activation::tanh},
+    tensor::{
+        TensorData,
+        activation::{softmax, tanh},
+        quantization::{Calibration, QuantLevel, QuantParam, QuantScheme, QuantStore, QuantValue},
+    },
 };
 
-type MyBackend = Autodiff<NdArray<f32>>;
+type InferenceBackend = Flex;
+type MyBackend = Autodiff<InferenceBackend>;
 
 #[derive(Module, Debug)]
 struct Net<B: Backend> {
@@ -42,6 +47,8 @@ impl<B: Backend> Net<B> {
 }
 
 #[test]
+// Trains the tiny micrograd example with Burn, then quantizes the trained weights
+// to FP4 and queries the quantized network.
 fn micrograd_burn() {
     let device = Default::default();
 
@@ -87,5 +94,54 @@ fn micrograd_burn() {
     let predictions = model.forward(xs);
 
     println!("predictions:");
-    println!("{:?}", predictions.into_data());
+    println!("{:?}", predictions.into_data().to_vec::<f32>().unwrap());
+
+    let fp4_scheme = QuantScheme::default()
+        .with_value(QuantValue::E2M1)
+        .with_level(QuantLevel::Tensor)
+        .with_store(QuantStore::Native)
+        .with_param(QuantParam::F32);
+
+    let mut fp4_quantizer = Quantizer {
+        calibration: Calibration::MinMax,
+        scheme: fp4_scheme,
+    };
+    let fp4_model = model.valid().quantize_weights(&mut fp4_quantizer);
+
+    let query = Tensor::<InferenceBackend, 2>::from_data(
+        TensorData::from([
+            [2.0_f32, 3.0, -1.0],
+            [3.0_f32, -1.0, 0.5],
+            [0.5_f32, 1.0, 1.0],
+            [1.0_f32, 1.0, -1.0],
+        ]),
+        &device,
+    );
+    let fp4_prediction = fp4_model.forward(query);
+    let fp4_prediction_softmax = softmax(fp4_prediction.clone(), 0);
+
+    println!("FP4 predictions:");
+    println!("{:?}", fp4_prediction.into_data().to_vec::<f32>().unwrap());
+
+    println!("FP4 softmax predictions:");
+    println!(
+        "{:?}",
+        fp4_prediction_softmax
+            .clone()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+    );
+
+    let targets = Tensor::<InferenceBackend, 2>::from_data(
+        TensorData::from([[1.0_f32], [-1.0_f32], [1.0_f32], [1.0_f32]]),
+        &device,
+    );
+    let targets_softmax = softmax(targets, 0);
+    let fp4_loss = (fp4_prediction_softmax - targets_softmax)
+        .powf_scalar(2.0)
+        .mean();
+
+    println!("FP4 softmax loss:");
+    println!("{:?}", fp4_loss.into_data().to_vec::<f32>().unwrap()[0]);
 }

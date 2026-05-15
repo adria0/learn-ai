@@ -42,9 +42,6 @@ struct Expr {
 #[derive(Default)]
 struct ExprArena {
     exprs: Vec<Expr>,
-    zero: ExprId,
-    one: ExprId,
-    two: ExprId,
 }
 
 impl ExprArena {
@@ -123,7 +120,7 @@ impl ExprArena {
     }
 
     // Backward compute partial derivates
-    pub fn back_propagation(&mut self, end: ExprId) -> () {
+    pub fn backward(&mut self, end: ExprId) -> () {
         self.exprs[end].grad = 1.0;
 
         for x in self.topo_sorted_nodes(end) {
@@ -182,7 +179,7 @@ impl Neuron {
         let bias = arena.v(rng.random_range(-1.0..1.0));
         Self { weights, bias }
     }
-    fn apply(&self, arena: &mut ExprArena, x: &[ExprId]) -> ExprId {
+    fn forward(&self, arena: &mut ExprArena, x: &[ExprId]) -> ExprId {
         assert_eq!(self.weights.len(), x.len());
         let mut sum = self.bias;
         for (w, x) in self.weights.iter().zip(x.iter()) {
@@ -204,10 +201,10 @@ impl Layer {
             .collect();
         Self { neurons }
     }
-    fn ask(&self, arena: &mut ExprArena, x: &[ExprId]) -> Vec<ExprId> {
+    fn forward(&self, arena: &mut ExprArena, x: &[ExprId]) -> Vec<ExprId> {
         self.neurons
             .iter()
-            .map(|neuron| neuron.apply(arena, x))
+            .map(|neuron| neuron.forward(arena, x))
             .collect()
     }
 }
@@ -230,10 +227,10 @@ impl MultiLayerPerceptron {
             .collect();
         Self { layers }
     }
-    fn ask(&self, arena: &mut ExprArena, x: &[ExprId]) -> Vec<ExprId> {
+    fn forward(&self, arena: &mut ExprArena, x: &[ExprId]) -> Vec<ExprId> {
         let mut x = x.to_vec();
         for layer in &self.layers {
-            x = layer.ask(arena, &x)
+            x = layer.forward(arena, &x)
         }
         x
     }
@@ -276,7 +273,7 @@ impl MultiLayerPerceptron {
             let mut loss = arena.v(0);
             let two = arena.v(2);
             for (x, y) in training_x.iter().zip(training_y.iter()) {
-                let y_estimate = self.ask(arena, x)[0];
+                let y_estimate = self.forward(arena, x)[0];
                 let y_diff = arena.sub(*y, y_estimate);
                 let y_diff_sq = arena.pow(y_diff, two);
                 loss = arena.s(loss, y_diff_sq);
@@ -285,7 +282,7 @@ impl MultiLayerPerceptron {
             for expr in arena.exprs.iter_mut() {
                 expr.grad = 0.0;
             }
-            arena.back_propagation(loss);
+            arena.backward(loss);
 
             for param in &parameters {
                 arena[*param].data += -gradient_increment * arena[*param].grad;
@@ -320,7 +317,7 @@ fn test_micrograd_base() {
     let b = ea.v(6.88137358);
     let n = ea.s(x1w1x2w2, b);
     let o = ea.tanh(n);
-    ea.back_propagation(o);
+    ea.backward(o);
 
     assert_eq!(0.7071, trunc4(ea[o].data));
     assert_eq!(0.5, trunc4(ea[n].grad));
@@ -368,7 +365,7 @@ fn test_mlp_base() {
         let mut loss = ea.v(0);
         let two = ea.v(2);
         for (x, y) in xs.iter().zip(ys.iter()) {
-            let y_estimate = mlp.ask(&mut ea, x)[0];
+            let y_estimate = mlp.forward(&mut ea, x)[0];
             let y_diff = ea.sub(*y, y_estimate);
             let y_diff_sq = ea.pow(y_diff, two);
             loss = ea.s(loss, y_diff_sq);
@@ -377,7 +374,7 @@ fn test_mlp_base() {
         for expr in ea.exprs.iter_mut() {
             expr.grad = 0.0;
         }
-        ea.back_propagation(loss);
+        ea.backward(loss);
 
         for param in &parameters {
             ea[*param].data += -0.05 * ea[*param].grad;
@@ -414,7 +411,7 @@ fn test_mlp_training() {
     assert!(loss < loss_limit);
 
     let data = ea.va([2.0, 3.0, -1.0]);
-    let res = mlp.ask(&mut ea, &data)[0];
+    let res = mlp.forward(&mut ea, &data)[0];
 
     println!("res={}", ea[res].data);
     println!("loss={loss}");
@@ -464,7 +461,7 @@ fn test_mlp_training_x_mul_y() {
                         let expected = x * y;
 
                         let data = ea.va([x, y]);
-                        let got = mlp.ask(&mut ea, &data)[0];
+                        let got = mlp.forward(&mut ea, &data)[0];
                         let got = ea[got].data;
 
                         sum += (expected - got).powi(2);
